@@ -1,4 +1,15 @@
 .DS_Store
 __pycache__/
-*.pyc
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
 results/
+runs/
+*.zip
+*.log
+.env
+
+# Local experiment outputs and generated figures
+reports/
