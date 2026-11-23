@@ -1,164 +1,124 @@
+"""Compact QAE aggregation of a classically trained Random Forest.
+
+Tree traversal and leaf predictions are classical. State preparation enumerates
+all trees; this CPU simulation is not an implementation of efficient QRAM queries.
+The path register is omitted, matching the completed compact m=9 experiment.
+"""
+import math
+
 import numpy as np
 import pennylane as qml
-from numpy import binary_repr
+
 
 def get_alpha(prediction, y_min, y_max):
-
     norm = np.clip((prediction - y_min) / (y_max - y_min + 1e-15), 0, 1)
-    alpha = np.arcsin(np.sqrt(norm))
-
-    return alpha
+    return np.arcsin(np.sqrt(norm))
 
 
-def get_tree_path_bits(X_input, tree, max_depth):
-    node = tree.decision_path(X_input.reshape(1, -1))
-    node_index = node.indices[node.indptr[0]: node.indptr[1]]
-    
-    path_bits =[]
-
-    for i in range(len(node_index) - 1):
-        curr_node = node_index[i]
-        next_node = node_index[i+1]
-
-        if tree.tree_.children_right[curr_node] == next_node:
-            path_bits.append(1)
-        else:
-            path_bits.append(0)
-
-        
-    if len(path_bits) < max_depth:
-        path_bits += [0] * (max_depth - len(path_bits))
-
-    return path_bits[:max_depth]
-
-def multiplication(wires):
-    for i in range(len(wires) - 1):
-        qml.SWAP(wires=[wires[i], wires[i+1]])
-
-
-# I - 2|fi><fi>
 def reflection_R(wires):
-    for w in wires:
-        qml.PauliX(wires=w)
-    
+    """Reflection I - 2|0><0| on the tree and output registers."""
+    for wire in wires:
+        qml.PauliX(wires=wire)
     qml.Hadamard(wires=wires[-1])
     qml.MultiControlledX(wires=wires)
     qml.Hadamard(wires=wires[-1])
+    for wire in wires:
+        qml.PauliX(wires=wire)
 
-    for w in wires:
-        qml.PauliX(wires=w)
+
+def repetitions_for_delta(delta):
+    """Odd median repetitions certified by the generic QAE success bound."""
+    if not 0 < delta < 0.5:
+        raise ValueError("delta must be between 0 and 0.5")
+    failure = 1 - 8 / math.pi ** 2
+    for count in range(1, 1001, 2):
+        bound = sum(math.comb(count, k) * failure ** k * (1 - failure) ** (count - k)
+                    for k in range(count // 2 + 1, count + 1))
+        if bound <= delta:
+            return count
+    raise ValueError("delta is too small")
+
 
 class QRF:
-    def __init__(self, rf_model, y_min, y_max, n_precision_qubits=4):
+    def __init__(self, rf_model, y_min, y_max, n_precision_qubits=9):
         self.rf = rf_model
-        self.y_min = y_min
-        self.y_max = y_max
+        self.y_min = float(y_min)
+        self.y_max = float(y_max)
+        if not np.isfinite([self.y_min, self.y_max]).all() or y_max <= y_min:
+            raise ValueError("Normalization requires finite y_max > y_min")
+        if not isinstance(n_precision_qubits, int) or n_precision_qubits < 1:
+            raise ValueError("n_precision_qubits must be a positive integer")
 
         self.n_trees = len(rf_model.estimators_)
-        self.tree_depth = max([e.get_depth() for e in rf_model.estimators_])
-
-        self.n_lambda = int(np.ceil(np.log2(self.n_trees)))
+        if self.n_trees < 2 or self.n_trees & (self.n_trees - 1):
+            raise ValueError("Tree count must be a power of two, at least 2")
+        self.tree_depth = max(tree.get_depth() for tree in rf_model.estimators_)
+        self.n_lambda = int(math.log2(self.n_trees))
         self.lambda_wires = list(range(self.n_lambda))
-
-        self.n_psi = self.tree_depth + 1
-        self.psi_wires = list(range(self.n_lambda, self.n_psi + self.n_lambda))
-
-        self.phi_wire = self.psi_wires[-1] + 1
-
+        self.phi_wire = self.n_lambda
         self.n_amp = n_precision_qubits
         self.amp_wires = list(range(self.phi_wire + 1, self.phi_wire + 1 + self.n_amp))
-
-
         self.total_wires = self.amp_wires[-1] + 1
-
-        self.tree_data =[]
+        self.tree_data = []
 
     def _tree_control_values(self, tree_idx):
-        return[int(x) for x in list(binary_repr(tree_idx, self.n_lambda))]
+        return [int(bit) for bit in format(tree_idx, f"0{self.n_lambda}b")]
 
     def prepare_tree_data(self, X_input):
-        self.tree_data =[] 
-        for i, tree in enumerate(self.rf.estimators_):
-            bits = get_tree_path_bits(X_input, tree, tree.max_depth)         
-
-            pred = tree.predict(X_input.reshape(1, -1))[0]
-            alpha = get_alpha(pred, self.y_min, self.y_max)
-
-            self.tree_data.append({
-                'id': i,
-                'path_bits': bits,
-                'alpha': alpha
-            })
-
+        sample = np.asarray(X_input).reshape(1, -1)
+        self.tree_data = [
+            {"alpha": get_alpha(tree.predict(sample)[0], self.y_min, self.y_max)}
+            for tree in self.rf.estimators_
+        ]
 
     def U_operator(self):
         for wire in self.lambda_wires:
             qml.Hadamard(wires=wire)
-        
-        qml.PauliX(wires=self.psi_wires[-1])
-
-
-        for depth in range(self.tree_depth):
-            for tree_idx in range(self.n_trees):
-
-                if depth < len(self.tree_data[tree_idx]['path_bits']):
-                    control_values = self._tree_control_values(tree_idx)
-                    direction_bit = self.tree_data[tree_idx]['path_bits'][depth]
-
-                    qml.ctrl(multiplication,control=self.lambda_wires, control_values=control_values)(self.psi_wires)
-
-
-                    if direction_bit == 1:
-                        qml.MultiControlledX(wires=self.lambda_wires + [self.psi_wires[-1]], control_values=control_values)
-                    
-        
-        for tree_idx in range(self.n_trees):
-            control_values = self._tree_control_values(tree_idx)
-            alpha = self.tree_data[tree_idx]['alpha']
-
-            qml.ctrl(qml.RY, control=self.lambda_wires, control_values=control_values)(2*alpha, wires=self.phi_wire)
+        for tree_idx, data in enumerate(self.tree_data):
+            qml.ctrl(qml.RY, control=self.lambda_wires,
+                     control_values=self._tree_control_values(tree_idx))(
+                         2 * data["alpha"], wires=self.phi_wire)
 
     def grover_step(self):
-        qml.PauliX(wires=self.phi_wire) # XZX = -Z; I - 2|fi><fi| -----> 2|fi><fi> - I
+        qml.PauliX(wires=self.phi_wire)
         qml.PauliZ(wires=self.phi_wire)
         qml.PauliX(wires=self.phi_wire)
         qml.adjoint(self.U_operator)()
-        reflection_R(self.lambda_wires + self.psi_wires + [self.phi_wire])
+        reflection_R(self.lambda_wires + [self.phi_wire])
         self.U_operator()
-    
+
     def get_circuit_probs(self, X_input):
         self.prepare_tree_data(X_input)
+        dev = qml.device("lightning.qubit", wires=self.total_wires, shots=None)
 
-        dev = qml.device("lightning.qubit", wires=self.total_wires)
-
-        @qml.qnode(device=dev)
+        @qml.qnode(dev)
         def circuit():
-            
             self.U_operator()
-
-            for w in self.amp_wires: 
-                qml.Hadamard(wires=w)
-
+            for wire in self.amp_wires:
+                qml.Hadamard(wires=wire)
             for i, control_wire in enumerate(self.amp_wires):
-                power = 2**(self.n_amp - 1 - i)
-                for _ in range(power):
+                for _ in range(2 ** (self.n_amp - 1 - i)):
                     qml.ctrl(self.grover_step, control=control_wire)()
-
             qml.adjoint(qml.QFT)(wires=self.amp_wires)
-            
             return qml.probs(wires=self.amp_wires)
 
         return circuit()
 
-    def predict(self, X_input, delta=0.05):
-        n_reps = max(1, int(np.ceil(np.log(1.0 / delta))))
+    def predict(self, X_input, delta=0.05, rng=None):
+        """Sample the simulated distribution and return the median load estimate.
 
-        probs = self.get_circuit_probs(X_input)
-        m = self.n_amp
-        k_values = np.arange(2 ** m)
-
-        measured_ks = np.random.choice(k_values, size=n_reps, p=probs) # sample k values according to the probabilities from the circuit
-        beta_estimates = np.sin(np.pi * measured_ks / (2 ** m)) ** 2 # beta = sin^2(pi * k / 2^m)
-        y_estimates = beta_estimates * (self.y_max - self.y_min) + self.y_min # convert beta back to the original
-
-        return np.median(y_estimates), n_reps
+        delta controls failure probability, not relative forecasting error.
+        The exact probability vector is simulated once and reused for sampling.
+        Pass an explicit NumPy Generator for reproducible per-object estimates.
+        """
+        count = repetitions_for_delta(delta)  # 7 for delta=0.05
+        probs = np.asarray(self.get_circuit_probs(X_input), dtype=float)
+        if (not np.isfinite(probs).all() or probs.min() < -1e-12
+                or not np.isclose(probs.sum(), 1, atol=1e-8, rtol=0)):
+            raise ValueError("Invalid circuit probability distribution")
+        probs = np.maximum(probs, 0)
+        probs /= probs.sum()
+        rng = np.random.default_rng() if rng is None else rng
+        measured = rng.choice(len(probs), size=count, p=probs)
+        beta = float(np.median(np.sin(np.pi * measured / (2 ** self.n_amp)) ** 2))
+        return beta * (self.y_max - self.y_min) + self.y_min, count
