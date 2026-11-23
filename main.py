@@ -54,7 +54,7 @@ if __name__ == "__main__":
         DELTA = 0.05
         
         NUM_SAMPLES = len(X_test)
-        N_PRECISION_QUBITS = 5
+        N_PRECISION_QUBITS = 9
         N_JOBS = 40 #adjust to the number of cores
         
         print(f"Parallel jobs: {N_JOBS}")
