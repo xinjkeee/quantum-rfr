@@ -1,7 +1,5 @@
-"""Minimal reproducible compact-QRF experiment; no server deployment helpers."""
 import os
 
-# Each test object is simulated by one independent process, without nested BLAS.
 for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ[key] = "1"

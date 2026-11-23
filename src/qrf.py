@@ -1,9 +1,4 @@
-"""Compact QAE aggregation of a classically trained Random Forest.
-
-Tree traversal and leaf predictions are classical. State preparation enumerates
-all trees; this CPU simulation is not an implementation of efficient QRAM queries.
-The path register is omitted, matching the completed compact m=9 experiment.
-"""
+"""Compact QAE aggregation of a classically trained Random Forest"""
 import math
 
 import numpy as np
@@ -105,12 +100,7 @@ class QRF:
         return circuit()
 
     def predict(self, X_input, delta=0.05, rng=None):
-        """Sample the simulated distribution and return the median load estimate.
-
-        delta controls failure probability, not relative forecasting error.
-        The exact probability vector is simulated once and reused for sampling.
-        Pass an explicit NumPy Generator for reproducible per-object estimates.
-        """
+        """Sample the simulated distribution and return the median load estimate"""
         count = repetitions_for_delta(delta)  # 7 for delta=0.05
         probs = np.asarray(self.get_circuit_probs(X_input), dtype=float)
         if (not np.isfinite(probs).all() or probs.min() < -1e-12

@@ -56,7 +56,7 @@ def absolute_metrics(reference, prediction):
 
 
 def load_metrics(reference, prediction):
-    """Percentage metrics are only for physical load R, never normalized beta."""
+    """Percentage metrics are only for physical load R"""
     a, b = np.asarray(reference, dtype=float), np.asarray(prediction, dtype=float)
     error = abs(a - b)
     den = abs(a) + abs(b)
